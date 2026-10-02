@@ -1,0 +1,159 @@
+# 🏛️ مستند معماری و راهنمای پنل مدیریت ادمین لاراول eCardo
+## ECardo Admin Backend Management & Audit Architecture Specification
+
+این سند معماری، نقشه راه، دسترسی‌ها و جزئیات کنترلرهای مدیریتی پلتفرم eCardo را برای ۲۴ سرویس کلیدی مشخص می‌کند. تمامی کنترلرها در مسیر `app/Http/Controllers/Backend/` و روت‌ها در `routes/admin.php` پیاده‌سازی شده‌اند.
+
+---
+
+## ۱. نمای کلی معماری پنل ادمین (Admin Architecture Overview)
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ECARDO ADMIN ECOSYSTEM                          │
+│                                                                        │
+│   Web Admin Blade Panel   ◀───►   REST / JSON API for Dashboards       │
+│                                │                                       │
+│                       routes/admin.php                                 │
+│                                │                                       │
+│         ┌──────────────────────┴──────────────────────┐                │
+│         ▼                                             ▼                │
+│  [Permission Middleware]                       [Idempotency Guard]     │
+│  (Sanctum / Spatie Permission)                 (WendellAdriel)         │
+│         │                                             │                │
+│         └──────────────────────┬──────────────────────┘                │
+│                                ▼                                       │
+│                app/Http/Controllers/Backend/                          │
+│  ┌───────────────────────┬───────────────────────┬──────────────────┐  │
+│  │ AdminDashboardContr.  │ AdminKycController    │ AdminLoanContr.  │  │
+│  ├───────────────────────┼───────────────────────┼──────────────────┤  │
+│  │ AdminGuaranteeContr.  │ AdminLicenseContr.    │ AdminVisaContr.  │  │
+│  ├───────────────────────┼───────────────────────┼──────────────────┤  │
+│  │ AdminEscrowContr.     │ AdminTourContr.       │ P2P Controllers  │  │
+│  └───────────────────────┴───────────────────────┴──────────────────┘  │
+│                                │                                       │
+│        ┌───────────────────────┴───────────────────────┐               │
+│        ▼                                               ▼               │
+│  [Double-Entry Ledger]                          [Admin Audit Log]      │
+│  (FinAegis JournalEntry                         (Operator ID, IP,      │
+│   with lockForUpdate ASC)                        Timestamp, Payload)   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## ۲. ماتریس دسترسی‌ها و پرمیشن‌ها (Permission Matrix)
+
+تمامی کنترلرها با استفاده از واسط `HasMiddleware` کنترلرهای لاراول ۱۱/۱۲ ایمن‌سازی شده‌اند:
+
+| ماژول | پرمیشن مشاهده و پایش (Read / Manage) | پرمیشن عملیات و اقدام مالی (Action / Write) |
+| :--- | :--- | :--- |
+| **داشبورد مرکزی** | `dashboard-view` | — |
+| **احراز هویت (KYC)** | `kyc-manage` | `kyc-action` |
+| **وام و تسهیلات** | `loan-manage` | `loan-action` |
+| **ضمانت‌نامه و LC** | `guarantee-manage` | `guarantee-action` |
+| **فروشگاه لایسنس** | `license-manage` | `license-action` |
+| **ویزا و کنسولی** | `visa-manage` | `visa-action` |
+| **معاملات امانی اسکرو** | `escrow-manage` | `escrow-action` |
+| **تور و سفر** | `tour-manage` | `tour-action` |
+| **معاملات P2P** | `p2p-orders-manage`, `p2p-ads-manage` | `p2p-orders-resolve`, `p2p-ads-approve` |
+
+---
+
+## ۳. شرح ماژول‌ها و اکشن‌های سریع (Quick Actions)
+
+### ۱. داشبورد جامع ادمین (`AdminDashboardController`)
+- **مسیر:** `/admin/dashboard`
+- **امکانات:**
+  - **KPI Summary:** موجودی کل والت‌ها، مبالغ وام‌های فعال و معوق، حجم ضمانت‌نامه‌های در تعهد، حجم امانی قفل‌شده اسکرو، سفارشات روزانه لایسنس و ویزا.
+  - **Urgent Action Center:** کارت‌های اقدام سریع برای صف KYC معطل، اختلافات باز اسکرو و P2P، مطالبات حقوقی ضمانت‌نامه، اقساط معوق، و هشدار انبار کلیدهای رو به اتمام.
+  - **Audit Stream:** آخرین ۲۰ لاگ ثبت‌شده از فعالیت اپراتورها به همراه IP و نام مسئول.
+  - **Gateway Health:** پایش آنلاین وضعیت لجر، سپام، کارگزاری سهام، اوراکل نرخ ارز و صندوق HSM.
+
+### ۲. احراز هویت و ممیزی مدارک (`AdminKycController`)
+- **مسیر:** `/admin/kyc`
+- **امکانات ویژه:**
+  - فیلتر وضعیت (`pending`, `approved`, `rejected`, `on_hold`) و سطح KYC (سطح ۱، ۲، ۳).
+  - پیش‌نمایش مستقیم تصویر یا PDF مدارک (`/admin/kyc/{id}/document/{docType}/preview`).
+  - **تایید سریع:** ارتقای اتوماتیک سطح کاربری به `kyc_level: 2` یا `3` و ثبت اپراتور تاییدکننده.
+  - **رد ساختاریافته (Rejected Data Contract):** ثبت دسته‌بندی و دلیل رد همراه با مشخص کردن مدارک نیازمند ارسال مجدد. این خروجی مستقیماً توسط اندپوینت فرانت‌اند `/user/kyc/rejected-data` خوانده می‌شود تا در ویزارد به کاربر نمایش داده شود.
+  - **تعلیق و نگهداری (Put on Hold):** درخواست مدارک تکمیلی با درج یادداشت راهنما.
+
+### ۳. مدیریت وام و اعتبارات (`AdminLoanController`)
+- **مسیر:** `/admin/loans`
+- **امکانات ویژه:**
+  - فیلتر وضعیت کامل چرخه وام (`APPLIED`, `UNDER_ASSESSMENT`, `OFFERED`, `AWAITING_COLLATERAL`, `AWAITING_SIGNING`, `ACTIVE`, `OVERDUE`, `COMPLETED`, `CANCELLED`).
+  - **ارزیابی و آفر (Assess & Offer):** تعیین مبلغ مصوب، نرخ سود سالانه، مدت بازپرداخت و مهلت اعتبار پیشنهاد با محاسبه اتوماتیک فرمول استهلاک اقساط (Amortization EMI).
+  - **تایید وثیقه:** بررسی و قفل دارایی‌های تودیعی (سپرده نقدی، رمزارز USDT/BTC با پایش LTV، طلا، سفته الکترونیک).
+  - **واریز به والت (Disbursement):** واریز به کیف پول متقاضی درون `DB::transaction()` با قفل والت `ORDER BY id ASC` و ثبت سند دوبل در `journal_entries` + تولید خودکار سررسید اقساط در جدول `loan_installments`.
+  - **ثبت دستی وصول قسط:** امکان ثبت تسویه اقساط با اعمال تغییر وضعیت به `PAID` و تسویه کامل در صورت اتمام اقساط.
+
+### ۴. مدیریت ضمانت‌نامه‌ها و اعتبارات اسنادی (`AdminGuaranteeController`)
+- **مسیر:** `/admin/guarantees`
+- **امکانات ویژه:**
+  - پایش انواع ضمانت‌نامه (`Bid Bond`, `Performance Bond`, `Advance Payment`, `LC`).
+  - **تایید بررسی اولیه (Approve Review):** انتساب بانک عامل، تعیین درصد وجه التزام (مثلاً ۱۰٪) و کارمزد سالانه (مثلاً ۱.۵٪) با تعیین مهلت تودیع ۴۸ ساعته.
+  - **تایید تودیع مارجین:** تایید حبس وجه در حساب امانی کاستودیال پلتفرم.
+  - **ثبت رسمی سپام (Issue SEPAM):** درج کد رهگیری سپام بانک مرکزی، شماره مرجع بانک، تاریخ صدور و انقضا به همراه فایل PDF ضمانت‌نامه رسمی.
+  - **مدیریت خسارت و مطالبه (Claim):** فریز فوری تضامین و صدور اخطار حقوقی.
+  - **آزادسازی مارجین (Release):** بازگشت وجه التزام به کیف پول کاربر پس از انقضای قانونی یا ابطال از طریق لجر دوبل.
+
+### ۵. فروشگاه لایسنس و صندوق امن انبار (`AdminLicenseController`)
+- **مسیر:** `/admin/licenses`
+- **امکانات ویژه:**
+  - مدیریت دسته‌بندی‌ها (سیستم‌عامل، توسعه‌دهندگان، هوش مصنوعی، امنیت).
+  - **صندوق انبار کلیدها (Vault Inventory):** نمایش تعداد کلیدهای موجود (`AVAILABLE`) در برابر واگذارشده (`ASSIGNED`) و باطل‌شده (`REVOKED`).
+  - **ورود دسته‌ای کلیدها (Bulk Import):** بارگذاری لیستی از کلیدهای خام با رمزنگاری متقارن در پایگاه داده.
+  - **داوری اختلاف (Resolve Dispute):**
+    - `REPLACE_KEY`: ابطال کلید معیوب و انتساب خودکار کلید معتبر جدید از صندوق انبار.
+    - `REFUND_WALLET`: استرداد کامل وجه خرید به کیف پول کاربر با ثبت سند بستانکار دوبل در `journal_entries`.
+    - `REJECT_DISPUTE`: رد ادعا با درج دلیل مستند.
+
+### ۶. خدمات ویزا و امور کنسولی (`AdminVisaController`)
+- **مسیر:** `/admin/visas`
+- **امکانات ویژه:**
+  - پرونده کامل مسافر: گذرنامه، تاریخ ورود/خروج، عکس پرسنلی، دعوت‌نامه و رزرو هتل.
+  - **ممیزی مدارک:** تایید یکپارچه مدارک یا رد مدرک خاص همراه با اخطار به متقاضی.
+  - **ثبت نوبت سفارت:** درج کد پیگیری کنسولگری و تاریخ مصاحبه.
+  - **صدور روادید (Issue e-Visa):** ثبت شماره ویزا، تاریخ اعتبار، تعداد دفعات ورود مجاز و بارگذاری فایل روادید الکترونیک.
+
+### ۷. معاملات امانی اسکرو و داوری اختلافات (`AdminEscrowController`)
+- **مسیر:** `/admin/escrows`
+- **امکانات ویژه:**
+  - مانیتورینگ سفارشات خریدار و فروشنده و مبالغ حبس‌شده در استخر امانی.
+  - تمدید مهلت بازرسی کالا (Inspection Period).
+  - **اتاق داوری و صدور حکم قطعی (Arbitration):**
+    - آزادسازی ۱۰۰٪ وجه به فروشنده (`RELEASE_TO_SELLER`).
+    - استرداد ۱۰۰٪ وجه به خریدار (`REFUND_TO_BUYER`).
+    - تقسیم درصدی منصفانه بر اساس تعهدات ایفا شده (`SPLIT_DISBURSEMENT`).
+    - اجرای تسویه با قفل والت هر دو طرف بر اساس `ORDER BY id ASC` و ثبت سند دوبل در `journal_entries`.
+
+### ۸. خدمات تور و رزرواسیون سفر (`AdminTourController`)
+- **مسیر:** `/admin/tours` و `/admin/travel-bookings`
+- **امکانات ویژه:**
+  - تعریف و انتشار بسته‌های تور، تعیین ظرفیت، قیمت و برنامه سفر.
+  - مشاهده لیست مسافران هر تور به صورت تجمعی.
+  - صدور ووچر و بلیط سفر برای رزرواسیون‌های قطعی‌شده.
+  - لغو و کنسلی سفر همراه با کسر درصد جریمه قانونی (`penalty_pct`) و استرداد مابقی وجه به کیف پول مسافر از طریق لجر پلتفرم.
+
+---
+
+## ۴. ساختار ثبت لاگ‌های حسابرسی ادمین (Admin Audit Logging)
+
+تمامی کنترلرها مجهز به متد `logAdminActivity` هستند. در صورتی که جدول `admin_audit_logs` در دیتابیس وجود داشته باشد، سوابق به صورت خودکار در آن ذخیره می‌شوند:
+
+```sql
+CREATE TABLE `admin_audit_logs` (
+  `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `admin_id` BIGINT UNSIGNED NOT NULL,
+  `action` VARCHAR(64) NOT NULL,
+  `entity_type` VARCHAR(64) NOT NULL,
+  `entity_id` BIGINT UNSIGNED NOT NULL,
+  `details` JSON NULL,
+  `ip_address` VARCHAR(45) NULL,
+  `user_agent` TEXT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_admin_action` (`admin_id`, `action`),
+  INDEX `idx_entity` (`entity_type`, `entity_id`)
+);
+```
+در غیر این صورت، لاگ‌ها به صورت خودکار و امن در کانال لاگ استاندارد لاراول (`Log::info`) ثبت می‌گردند.
