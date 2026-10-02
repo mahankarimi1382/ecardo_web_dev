@@ -140,4 +140,15 @@ Route::group(['prefix' => 'admin', 'as' => 'admin.'], function () {
         require __DIR__ . '/admin_p2p.php';
     }
 
+    // =========================================================================
+    // 10. تنظیمات سیستم و کلید قطع اضطراری اکانت تست (System Settings & Demo Kill-Switch)
+    // =========================================================================
+    Route::group(['prefix' => 'settings', 'as' => 'settings.'], function () {
+        Route::get('demo-account', [AdminDashboardController::class, 'demoAccountStatus'])->name('demo_account.status');
+        Route::post('demo-account/toggle', [AdminDashboardController::class, 'toggleDemoAccount'])->name('demo_account.toggle');
+    });
+
+    // اندپوینت استعلام وضعیت اکانت تست برای فرانت‌اند (Mobile App & Web Clients)
+    Route::get('system/demo-status', [AdminDashboardController::class, 'publicDemoStatus'])->name('system.demo_status');
+
 });

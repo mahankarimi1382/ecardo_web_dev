@@ -7,22 +7,27 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Validator;
 
 /**
  * Class AdminDashboardController
  *
  * کنترلر داشبورد جامع ادمین eCardo — مانیتورینگ متمرکز کل ۲۴ سرویس
  * ارائه خلاصه‌های آماری لحظه‌ای، مرکز هشدارهای فوری (Urgent Action Center)،
- * وضعیت سلامت وب‌سرویس‌ها، و استریم لاگ‌های حسابرسی اپراتورها.
+ * وضعیت سلامت وب‌سرویس‌ها، استریم لاگ‌های حسابرسی،
+ * و کلید قطع اضطراری اکانت تست و دمو (Demo Account Kill-Switch).
  */
 class AdminDashboardController extends Controller implements HasMiddleware
 {
     public static function middleware(): array
     {
         return [
-            new Middleware('permission:dashboard-view', only: ['index', 'quickStats', 'urgentAlerts']),
+            new Middleware('permission:dashboard-view', only: ['index', 'quickStats', 'urgentAlerts', 'demoAccountStatus']),
+            new Middleware('permission:system-settings-manage', only: ['toggleDemoAccount']),
         ];
     }
 
@@ -35,6 +40,7 @@ class AdminDashboardController extends Controller implements HasMiddleware
         $urgentAlerts = $this->compileUrgentAlerts();
         $recentAuditLogs = $this->getRecentAuditLogs(20);
         $gatewayHealth = $this->checkGatewayHealth();
+        $demoSettings = $this->getDemoAccountSettings();
 
         if ($request->expectsJson() || $request->wantsJson()) {
             return response()->json([
@@ -45,6 +51,7 @@ class AdminDashboardController extends Controller implements HasMiddleware
                     'urgent_alerts' => $urgentAlerts,
                     'audit_logs'    => $recentAuditLogs,
                     'gateways'      => $gatewayHealth,
+                    'demo_account'  => $demoSettings,
                     'generated_at'  => now()->toIso8601String(),
                 ],
             ]);
@@ -55,6 +62,7 @@ class AdminDashboardController extends Controller implements HasMiddleware
             'urgentAlerts' => $urgentAlerts,
             'auditLogs'    => $recentAuditLogs,
             'gateways'     => $gatewayHealth,
+            'demoSettings' => $demoSettings,
         ]);
     }
 
@@ -80,14 +88,193 @@ class AdminDashboardController extends Controller implements HasMiddleware
         ]);
     }
 
+    // =========================================================================
+    // بخش تنظیمات و کلید قطع اضطراری اکانت تست (Demo Account Kill-Switch)
+    // =========================================================================
+
+    /**
+     * وضعیت فعلی اکانت تست و دمو
+     */
+    public function demoAccountStatus(Request $request)
+    {
+        $settings = $this->getDemoAccountSettings();
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'status' => true,
+                'data'   => $settings,
+            ]);
+        }
+
+        return view('backend.settings.demo_account', ['settings' => $settings]);
+    }
+
+    /**
+     * سوئیچ فعال/غیرفعال کردن سراسری اکانت تست (Demo Account Kill-Switch)
+     * قابلیت قفل آنی در محیط پروداکشن یا شرایط امنیتی
+     */
+    public function toggleDemoAccount(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'enabled' => 'required|boolean',
+            'reason'  => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            if ($request->expectsJson()) {
+                return response()->json(['status' => false, 'message' => $validator->errors()->first()], 422);
+            }
+            if (function_exists('notify')) notify()->error($validator->errors()->first());
+            return back()->withInput();
+        }
+
+        $admin = Auth::user();
+        $adminId = $admin ? $admin->id : 1;
+        $adminName = $admin ? ($admin->name ?? 'Admin') : 'System Admin';
+        $isEnabled = $request->boolean('enabled');
+        $reason = $request->input('reason', $isEnabled ? 'فعال‌سازی توسط مدیریت' : 'قطع اضطراری توسط ادمین (Kill-Switch Activated)');
+
+        try {
+            DB::beginTransaction();
+
+            if (Schema::hasTable('settings')) {
+                // بروزرسانی یا درج کلید وضعیت دمو
+                DB::table('settings')->updateOrInsert(
+                    ['name' => 'demo_account_enabled', 'type' => 'system'],
+                    ['val' => $isEnabled ? '1' : '0', 'updated_at' => now()]
+                );
+
+                // ذخیره لاگ و دلیل آخرین تغییر
+                DB::table('settings')->updateOrInsert(
+                    ['name' => 'demo_account_kill_reason', 'type' => 'system'],
+                    ['val' => $reason, 'updated_at' => now()]
+                );
+
+                DB::table('settings')->updateOrInsert(
+                    ['name' => 'demo_account_updated_by', 'type' => 'system'],
+                    ['val' => $adminName, 'updated_at' => now()]
+                );
+
+                DB::table('settings')->updateOrInsert(
+                    ['name' => 'demo_account_updated_at', 'type' => 'system'],
+                    ['val' => now()->toIso8601String(), 'updated_at' => now()]
+                );
+            }
+
+            // در صورتی که دمو غیرفعال شد، نشست‌های فعال کاربران تست را مسدود کن
+            if (!$isEnabled && Schema::hasTable('users')) {
+                DB::table('users')
+                    ->where('email', 'like', '%demo%')
+                    ->orWhere('email', 'like', '%test%')
+                    ->update([
+                        'status'     => 0, // غیرفعال موقت
+                        'updated_at' => now(),
+                    ]);
+            } elseif ($isEnabled && Schema::hasTable('users')) {
+                DB::table('users')
+                    ->where('email', 'like', '%demo%')
+                    ->update([
+                        'status'     => 1, // فعال‌سازی مجدد
+                        'updated_at' => now(),
+                    ]);
+            }
+
+            $this->logActivity('demo_account_kill_switch_toggled', $adminId, 'SystemSetting', [
+                'enabled'    => $isEnabled,
+                'reason'     => $reason,
+                'admin_name' => $adminName,
+            ]);
+
+            DB::commit();
+
+            $msg = $isEnabled
+                ? 'اکانت تست و دمو با موفقیت در سراسر سیستم فعال شد.'
+                : 'کلید قطع اضطراری (Kill-Switch) فعال شد: اکانت تست و دمو به طور کامل مسدود گردید.';
+
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'status'  => true,
+                    'message' => $msg,
+                    'data'    => [
+                        'demo_account_enabled' => $isEnabled,
+                        'reason'               => $reason,
+                        'updated_by'           => $adminName,
+                        'updated_at'           => now()->toIso8601String(),
+                    ],
+                ]);
+            }
+
+            if (function_exists('notify')) notify()->success($msg);
+            return back();
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("[AdminDashboardController@toggleDemoAccount] " . $e->getMessage());
+
+            if ($request->expectsJson()) {
+                return response()->json(['status' => false, 'message' => 'خطا در تغییر وضعیت اکانت دمو: ' . $e->getMessage()], 500);
+            }
+            if (function_exists('notify')) notify()->error('خطا در تغییر وضعیت اکانت دمو');
+            return back();
+        }
+    }
+
+    /**
+     * اندپوینت عمومی استعلام وضعیت دمو برای فرانت‌اند (Mobile App / Web)
+     * فرانت‌اند این متد را فراخوانی می‌کند تا در صورت غیرفعال بودن، دکمه ورود دمو را مخفی/غیرفعال کند
+     */
+    public function publicDemoStatus(Request $request)
+    {
+        $settings = $this->getDemoAccountSettings();
+        $isEnabled = $settings['enabled'];
+
+        return response()->json([
+            'status' => true,
+            'data'   => [
+                'demo_enabled' => $isEnabled,
+                'message'      => $isEnabled
+                    ? 'اکانت دمو و آزمایشی در دسترس است.'
+                    : 'اکانت تست توسط مدیریت غیرفعال شده است.',
+                'reason'       => $isEnabled ? null : ($settings['kill_reason'] ?? 'غیرفعال‌سازی توسط مدیریت'),
+                'checked_at'   => now()->toIso8601String(),
+            ],
+        ]);
+    }
+
     // -------------------------------------------------------------
     // محاسبات و تجمیع داده‌ها
     // -------------------------------------------------------------
+
+    protected function getDemoAccountSettings(): array
+    {
+        $enabled = true; // پیش‌فرض فعال
+        $reason = null;
+        $updatedBy = null;
+        $updatedAt = null;
+
+        if (Schema::hasTable('settings')) {
+            $settings = DB::table('settings')->where('type', 'system')->pluck('val', 'name')->toArray();
+            if (isset($settings['demo_account_enabled'])) {
+                $enabled = (bool) (int) $settings['demo_account_enabled'];
+            }
+            $reason = $settings['demo_account_kill_reason'] ?? null;
+            $updatedBy = $settings['demo_account_updated_by'] ?? null;
+            $updatedAt = $settings['demo_account_updated_at'] ?? null;
+        }
+
+        return [
+            'enabled'     => $enabled,
+            'kill_reason' => $reason,
+            'updated_by'  => $updatedBy,
+            'updated_at'  => $updatedAt,
+        ];
+    }
 
     protected function compileKpiSummary(): array
     {
         $userCount = Schema::hasTable('users') ? DB::table('users')->count() : 0;
         $totalWallets = Schema::hasTable('wallets') ? DB::table('wallets')->sum('balance') : 0;
+        $demoSettings = $this->getDemoAccountSettings();
 
         // KYC
         $kycPending = Schema::hasTable('user_kyc_verifications')
@@ -152,6 +339,10 @@ class AdminDashboardController extends Controller implements HasMiddleware
                 'total'         => $userCount,
                 'kyc_pending'   => $kycPending,
             ],
+            'system_controls' => [
+                'demo_account_enabled' => $demoSettings['enabled'],
+                'demo_kill_reason'     => $demoSettings['kill_reason'],
+            ],
             'financial' => [
                 'total_wallet_holdings'  => (float) $totalWallets,
                 'active_loans_volume'    => (float) $activeLoansAmount,
@@ -178,6 +369,19 @@ class AdminDashboardController extends Controller implements HasMiddleware
     protected function compileUrgentAlerts(): array
     {
         $alerts = [];
+        $demoSettings = $this->getDemoAccountSettings();
+
+        // 0. هشدار قطع اضطراری اکانت دمو در صورت غیرفعال بودن
+        if (!$demoSettings['enabled']) {
+            $alerts[] = [
+                'level'       => 'danger',
+                'service'     => 'System Security',
+                'title'       => 'کلید قطع اضطراری اکانت دمو فعال است',
+                'description' => "اکانت تست و دمو سراسر سیستم مسدود است. علت: " . ($demoSettings['kill_reason'] ?? 'ثبت نشده'),
+                'action_url'  => route('admin.settings.demo_account.status'),
+                'action_text' => 'مدیریت سوئیچ دمو',
+            ];
+        }
 
         // 1. بررسی پرونده‌های KYC معطل
         $pendingKyc = Schema::hasTable('user_kyc_verifications')
@@ -306,5 +510,26 @@ class AdminDashboardController extends Controller implements HasMiddleware
                 'last_checked' => now()->toIso8601String(),
             ],
         ];
+    }
+
+    protected function logActivity(string $action, $id, string $type, array $details = []): void
+    {
+        try {
+            if (Schema::hasTable('admin_audit_logs')) {
+                DB::table('admin_audit_logs')->insert([
+                    'admin_id'    => Auth::id() ?? 1,
+                    'action'      => $action,
+                    'entity_id'   => $id,
+                    'entity_type' => $type,
+                    'details'     => json_encode($details, JSON_UNESCAPED_UNICODE),
+                    'ip_address'  => request()->ip(),
+                    'created_at'  => now(),
+                ]);
+            } else {
+                Log::info("[AdminAuditLog] {$action} on {$type}#{$id}", $details);
+            }
+        } catch (\Exception $e) {
+            Log::warning("[AdminAuditLog Error] " . $e->getMessage());
+        }
     }
 }
