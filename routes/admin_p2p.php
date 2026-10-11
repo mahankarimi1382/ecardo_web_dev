@@ -11,7 +11,7 @@ use App\Http\Controllers\Backend\P2pPaymentMethodController;
 use App\Http\Controllers\Backend\P2pSettingsController;
 
 // [PHASE1-FIX] تمام روت‌های P2P داخل یک گروه هستند
-Route::group(['prefix' => 'p2p', 'as' => 'p2p.'], function () {
+Route::group(['prefix' => 'p2p', 'as' => 'p2p.', 'middleware' => ['web', 'auth:admin']], function () {
 
     // -------------------------------------------------------
     // بخش 1: متدهای پرداخت P2P

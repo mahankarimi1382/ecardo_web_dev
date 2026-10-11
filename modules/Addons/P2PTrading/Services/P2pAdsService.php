@@ -29,9 +29,9 @@ class P2pAdsService
             // [PHASE1-FIX] فیلتر کیورنسی دارایی (فقط یک بار)
             ->when(!empty($filters['asset_currency']), fn($q) => $q->where('asset_currency_id', $filters['asset_currency']))
             // [PHASE1] فیلتر وضعیت آگهی
-            ->when(isset($filters['status']), fn($q) => $q->where('status', AdsStatus::from($filters['status'])))
+            ->when(!empty($filters['status']) && ($st = AdsStatus::tryFrom($filters['status'])), fn($q) => $q->where('status', $st))
             // [PHASE1] فیلتر نوع آگهی (خرید/فروش)
-            ->when(isset($filters['type']), fn($q) => $q->where('type', AdsType::from($filters['type'])))
+            ->when(!empty($filters['type']) && ($tp = AdsType::tryFrom($filters['type'])), fn($q) => $q->where('type', $tp))
             // [PHASE1] فیلتر بازار (ایران/چین)
             ->when(isset($filters['market_type']), fn($q) => $q->where('market_type', $filters['market_type']))
             // [PHASE1-FIX] فیلتر دلار نقد - باگ پرانتز رفع شد

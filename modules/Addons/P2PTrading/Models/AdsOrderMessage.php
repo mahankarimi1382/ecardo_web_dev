@@ -38,7 +38,7 @@ class AdsOrderMessage extends Model
     // [PHASE1] متد پلی‌مورفیک: بر اساس sender_type مدل درست رو برمی‌گردونه
     public function sender(): User|Admin|null
     {
-        return $this->sender_type === OrderMessageActorType::Admin->value ? $this->admin : $this->user;
+        return $this->sender_type === OrderMessageActorType::Admin ? $this->admin : $this->user;
     }
 
     protected function casts(): array

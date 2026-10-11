@@ -132,10 +132,12 @@ class AdminKycController extends Controller implements HasMiddleware
             abort(404, 'سند مورد نظر بارگذاری نشده است.');
         }
 
-        $path = $document['file_path'];
+        $path = str_replace(['../', '..\\'], '', (string) $document['file_path']);
         $disk = Storage::disk(config('filesystems.default', 'public'));
+        $storageRoot = realpath($disk->path(''));
+        $fullPath = realpath($disk->path($path));
 
-        if (!$disk->exists($path)) {
+        if (!$fullPath || ($storageRoot && !str_starts_with($fullPath, $storageRoot)) || !$disk->exists($path)) {
             // در صورت عدم وجود فیزیکی در دیسک تستی، بازگردانی استریم پیش‌فرض یا URL
             return response()->json([
                 'status'  => true,
