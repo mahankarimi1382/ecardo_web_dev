@@ -85,7 +85,10 @@ class P2pOrderController extends Controller implements HasMiddleware
 
         try {
             $order = AdsOrder::findOrFail($id);
-            $admin = Auth::user();
+            $admin = Auth::guard('admin')->user();
+            if (! $admin && Auth::user() instanceof \App\Models\Admin) {
+                $admin = Auth::user();
+            }
 
             $this->orderService->resolveDispute(
                 order: $order,
